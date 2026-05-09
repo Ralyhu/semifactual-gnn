@@ -1,5 +1,11 @@
-# semifactual-gnn
-Semifactual Explanations for Graph Neural Networks (GNNs).
+# Semifactual Explanations for Graph Neural Networks (GNNs).
+
+## Overview 
+
+This project is developed as part of the following research paper:
+
+G. Alfano, S. Greco, D. Mandaglio, F. Parisi, R. Shahbazian, I. Trubitsyna. "Semifactual Explanations for GNN-based Classification: Formal Foundations, Complexity and Computation" published in the proceedings of the International Joint Conference on Artificial Intelligence, 2026.
+
 
 **Note:** This code is embedded in the [GNNXBench](https://github.com/idea-iitd/gnn-x-bench) library (ICLR2024), which provides a comprehensive benchmarking framework for GNN explainability methods.
 
