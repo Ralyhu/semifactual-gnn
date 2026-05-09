@@ -195,4 +195,8 @@ We also provide a shell script to run the factual explainers, available in the m
 
 Please check the script files to see which command should be run to receive which results.
 
+## Contact
+
+If you have any questions or need further assistance, please feel free to contact me at d.mandaglio@dimes.unical.it
+
 
