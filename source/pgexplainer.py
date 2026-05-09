@@ -1,0 +1,162 @@
+import torch
+import argparse
+import random
+import numpy as np
+import os
+import time
+
+import data_utils
+from gnn_trainer import GNNTrainer
+from torch_geometric.data import Data
+from methods.PGExplainer.explainers.PGExplainer import PGExplainer
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--batch_size', type=int, default=128)
+# 64 is used for social datasets (IMDB) and 16 or 32 for bio datasest (MUTAG, PTC, PROTEINS).
+parser.add_argument('--hidden_units', type=int, default=64)
+parser.add_argument('--dataset', type=str, default='Mutag',
+                    choices=['Mutagenicity', 'Proteins', 'Mutag', 'IMDB-B', 'AIDS', 'NCI1', 'Tree-of-Life', 'Graph-SST2', 'DD', 'REDDIT-B', 'ogbg_molhiv'],
+                    help="Dataset name")
+parser.add_argument('--device', type=int, default=0)
+parser.add_argument('--gnn_run', type=int, default=1)
+parser.add_argument('--explainer_run', type=int, default=1)
+parser.add_argument('--gnn_type', type=str, default='gcn', choices=['gcn', 'gat', 'gin', 'sage'])
+parser.add_argument('--epochs', type=int, default=100)
+parser.add_argument('--robustness', type=str, default='na', choices=['topology_random', 'topology_adversarial', 'feature', 'na'], help="na by default means we do not run for perturbed data")
+
+args = parser.parse_args()
+
+torch.manual_seed(args.explainer_run)
+torch.cuda.manual_seed(args.explainer_run)
+np.random.seed(args.explainer_run)
+random.seed(args.explainer_run)
+
+# Logging.
+result_folder = f'data/{args.dataset}/pgexplainer/'
+if not os.path.exists(result_folder):
+    os.makedirs(result_folder)
+
+device = torch.device(f'cuda:{args.device}' if torch.cuda.is_available() else 'cpu')
+print(f"Using device: {device}")
+dataset = data_utils.load_dataset(args.dataset)
+splits, indices = data_utils.split_data(dataset)
+
+
+best_explainer_model_path = os.path.join(result_folder, f'best_model_base_{args.gnn_type}_run_{args.gnn_run}_explainer_run_{args.explainer_run}.pt')
+args.best_explainer_model_path = best_explainer_model_path
+explanations_path = os.path.join(result_folder, f'explanations_{args.gnn_type}_run_{args.explainer_run}.pt')
+times_path = os.path.join(result_folder, f'times_{args.gnn_type}_run_{args.explainer_run}.txt')
+args.method = 'classification'
+
+if args.dataset in ['IMDB-B', 'REDDIT-B']:
+    args.hidden_units = 64
+else:
+    args.hidden_units = 32
+
+if args.dataset in ['Graph-SST2', 'ogbg_molhiv']:
+    lr = 0.001 * 0.05  # smaller lr for large dataset
+else:
+    lr = 0.001
+
+
+trainer = GNNTrainer(dataset_name=args.dataset, gnn_type=args.gnn_type, task='basegnn', device=args.device)
+model = trainer.load(args.gnn_run)
+model.eval()
+
+node_embeddings, graph_embeddings, outs = trainer.load_gnn_outputs(args.gnn_run)
+
+train_indices = indices[0]
+val_indices = indices[1]
+test_indices = indices[2]
+
+explainer = PGExplainer(model, dataset, node_embeddings, task='graph', device=device, save_folder=result_folder, args=args, reg_coefs=(0.00001, 0.0), lr=lr)
+
+if args.robustness == 'na':
+    # Measure training time
+    start_time = time.time()
+    explainer.prepare(train_indices=train_indices, val_indices=val_indices, start_training=True)
+    training_time = time.time() - start_time
+    
+    # Distribute training time across test explanations
+    training_time_per_explanation = training_time / len(test_indices)
+    
+    explanation_graphs = []
+    explanation_times = []
+    #for i in range(len(dataset)):
+    for i in test_indices: # test graphs only for fairness of comparison
+        start_time = time.time()
+        graph = dataset[i]
+        explanation = explainer.explain(i)
+        end_time = time.time()
+        explanation_time = end_time - start_time + training_time_per_explanation
+        explanation_times.append(explanation_time)
+        explanation_graphs.append(Data(
+            edge_index=graph.edge_index.clone(),
+            x=graph.x.clone(),
+            y=graph.y.clone(),
+            edge_weight=explanation.detach().cpu().clone()
+        ))
+    torch.save(explanation_graphs, explanations_path)
+    
+    # Save timing statistics
+    if len(explanation_times) > 0:
+        avg_time = np.mean(explanation_times)
+        std_time = np.std(explanation_times)
+        with open(times_path, 'w') as f:
+            f.write(f"{avg_time:.6f}\n")
+            f.write(f"{std_time:.6f}\n")
+elif args.robustness == 'topology_random':
+    explainer.prepare(train_indices=train_indices, val_indices=val_indices, start_training=False)
+    explainer.explainer_model.load_state_dict(torch.load(args.best_explainer_model_path, map_location=device))
+    for noise in [1, 2, 3, 4, 5]:
+        explanations_path = os.path.join(result_folder, f'explanations_{args.gnn_type}_run_{args.explainer_run}_noise_{noise}.pt')
+        explanation_graphs = []
+        noisy_dataset = data_utils.load_dataset(data_utils.get_noisy_dataset_name(dataset_name=args.dataset, noise=noise))
+        for i in range(len(dataset)):
+            noisy_graph = noisy_dataset[i].to(device)
+            explanation = explainer.explain_graph(noisy_graph)
+            explanation_graphs.append(Data(
+                edge_index=noisy_graph.edge_index.clone(),
+                x=noisy_graph.x.clone(),
+                y=noisy_graph.y.clone(),
+                edge_weight=explanation.detach().cpu().clone()
+            ))
+        torch.save(explanation_graphs, explanations_path)
+elif args.robustness == 'feature':
+    explainer.prepare(train_indices=train_indices, val_indices=val_indices, start_training=False)
+    explainer.explainer_model.load_state_dict(torch.load(args.best_explainer_model_path, map_location=device))
+    for noise in [10, 20, 30, 40, 50]:
+        explanations_path = os.path.join(result_folder, f'explanations_{args.gnn_type}_run_{args.explainer_run}_feature_noise_{noise}.pt')
+        explanation_graphs = []
+        noisy_dataset = data_utils.load_dataset(data_utils.get_noisy_feature_dataset_name(dataset_name=args.dataset, noise=noise))
+        for i in range(len(dataset)):
+            noisy_graph = noisy_dataset[i].to(device)
+            explanation = explainer.explain_graph(noisy_graph)
+            explanation_graphs.append(Data(
+                edge_index=noisy_graph.edge_index.clone(),
+                x=noisy_graph.x.clone(),
+                y=noisy_graph.y.clone(),
+                edge_weight=explanation.detach().cpu().clone()
+            ))
+        torch.save(explanation_graphs, explanations_path)
+elif args.robustness == 'topology_adversarial':
+    explainer.prepare(train_indices=train_indices, val_indices=val_indices, start_training=False)
+    explainer.explainer_model.load_state_dict(torch.load(args.best_explainer_model_path, map_location=device))
+    for flip_count in [1, 2, 3, 4, 5]:
+        explanations_path = os.path.join(result_folder, f'explanations_{args.gnn_type}_run_{args.explainer_run}_topology_adversarial_{flip_count}.pt')
+        explanation_graphs = []
+        noisy_dataset = data_utils.load_dataset(data_utils.get_topology_adversarial_attack_dataset_name(dataset_name=args.dataset, flip_count=flip_count))
+        for i in range(len(dataset)):
+            noisy_graph = noisy_dataset[i].to(device)
+            explanation = explainer.explain_graph(noisy_graph)
+            explanation_graphs.append(Data(
+                edge_index=noisy_graph.edge_index.clone(),
+                x=noisy_graph.x.clone(),
+                y=noisy_graph.y.clone(),
+                edge_weight=explanation.detach().cpu().clone()
+            ))
+        torch.save(explanation_graphs, explanations_path)
+else:
+    raise ValueError(f'Unknown robustness type {args.robustness}')
+
+
