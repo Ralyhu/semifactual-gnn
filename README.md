@@ -35,7 +35,7 @@ python source/data_utils.py
 
 ### Training Base GNNs
 
-If you want to train the GNN base models from scratch, you can run the following command:
+As an example, we provide pretrained GNN models for the MUTAG dataset. However, we recommend to train the GNN base models from scratch, you can run the following command:
 
 ```setup
 python source/basegnn.py --dataset <dataset_name> --gnn_type gcn --runs 1
